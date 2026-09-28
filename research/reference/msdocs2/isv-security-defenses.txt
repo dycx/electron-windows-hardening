@@ -1,0 +1,314 @@
+Windows ISV Software Security Defenses | Microsoft Learn
+Skip to main content
+Skip to Ask Learn chat experience
+This browser is no longer supported.
+Upgrade to Microsoft Edge to take advantage of the latest features, security updates, and technical support.
+Download Microsoft Edge
+More info about Internet Explorer and Microsoft Edge
+Table of contents
+Exit editor mode
+Ask Learn
+Ask Learn
+Reading mode
+Table of contents
+Read in English
+Add
+Add to Plans
+Copy Markdown
+Print
+Note
+Access to this page requires authorization. You can try signing in or changing directories.
+Access to this page requires authorization. You can try changing directories.
+Windows ISV Software Security Defenses
+Feedback
+Summarize this article for me
+In this article
+Michael Howard, Matt Miller, John Lambert and Matt Thomlinson
+Microsoft Corporation
+December 2010
+Introduction
+Starting with Windows XP SP2 and Windows Server 2003, Microsoft Windows offers a number of defensive enhancements designed to protect customers. Applications that run on these platforms should take full advantage of these defenses. They are essentially free, and can transform a serious vulnerability into a crashing bug that protects customers from more serious forms of exploitation.
+In the case of Internet Explorer, some of the Windows Vista defenses only come into play when all components consumed by the browser support the defenses. Because browsers are one of the most attacked (and compromised) software components, it is important that popular components consumed by the browser take full advantage of these defenses. The purpose of this short paper is to detail the defenses, and explain how software vendors should take advantage of the defenses to protect our shared customers
+In the case of Internet Explorer, some Windows defenses only come into play when all browser components support those defenses. Popular browser components should take full advantage of these defenses because browser applications are among the most frequently targeted for attack.
+The purpose of this paper is to detail the available defenses and to explain how software vendors can take advantage of these defenses to protect our shared customers.
+The Many Buffer Overrun Defenses in Microsoft Windows and Visual C++
+Windows incorporates a number of defensive strategies to protect customers from attack. Some of these defenses are part of the core operating system, and additional defenses are offered by the Microsoft Visual C++ compiler. The defenses include:
+/GS Stack buffer overrun detection.
+/SafeSEH exception handling protection.
+Structured Exception Handler Overwrite Protection (SEHOP).
+Data Execution Prevention (DEP) / No eXecute (NX).
+Address space layout randomization (ASLR).
+Pointer Encoding.
+Heap corruption detection.
+Migration of buffer-overrun prone functions to safer versions.
+On the following pages you’ll find explanations of each of these defenses, as well as information about how to enable them and how to verify that your application is actually taking advantage of them.
+/GS Stack Buffer Overrun Detection
+The Stack Buffer Overrun Detection capability was introduced to the C/C++ compiler in Visual Studio .NET 2002 and has been updated in subsequent versions. /GS is a compiler switch that instructs the compiler to add startup code, and function epilog and prolog code, to generate and check a random number that is placed in a function's stack. If this value is corrupted, a handler function is called to terminate the application and thus reduce the chance that the shell code attempting to exploit a buffer overrun will execute correctly.
+The Stack Buffer Overrun Detection capability was introduced to the C/C++ compiler in Visual Studio .NET 2002 and has been updated in subsequent versions. /GS is a compiler switch that instructs the compiler to add startup code, and function epilog and prolog code, to generate and check a random number that is placed in a function's stack. If this value is corrupted, a handler function is called to terminate the application and thus reduce the chance that the shell code attempting to exploit a buffer overrun will execute correctly.
+Note The performance impact of /GS is difficult to measure because it is highly dependent on coding style. Code with large numbers of stack-based string buffers and arguments might see a small impact; code with without them will see no impact. A ball-park figure may be on the order of a 3 percent performance impact, which is partially offset through other optimizations in later versions of the compiler.
+Note that Visual C++ 2005 (and later) also reorders data on the stack to make it harder to predictably corrupt that data. Examples include:
+Moving buffers to higher memory than non-buffers. This step can help protect function pointers that reside on the stack.
+Moving pointer and buffer arguments to lower memory at run time to mitigate various buffer overrun attacks.
+Visual C++ 2010 includes enhancements to /GS which expand the heuristics used to determine when /GS should be enabled for a function, and when /GS can safely be optimized away.
+In order to take advantage of enhanced /GS heuristics, ISVs using Visual C++ 2005 SP1 or later should add the following instruction in a commonly used header file to increase the number of functions protected by /GS:
+#pragma strict_gs_check(on)
+What’s the difference between –GS in Visual C++ 2010 and strict_gs_check?
+The rules for determining which functions require /GS protections are more aggressive in Visual C++ 2010 than they are in the compiler's earlier versions; however, the strict_gs_check rules are even more aggressive than Visual C++ 2010. Even though Visual C++2010 strikes a good balance, strict_gs_check should be used for Internet-facing products.
+ISV Tasks
+ISVs should compile their code with the most recent version of the compiler. At the time of writing, this version is VC++ 2010 (cl.exe version 16.00).
+ISVs using versions of VC++ older than VC++ 2010 should add #pragma string_gs_check(on) to a common header file.
+ISVs using VC++ 2010 and later should add #pragma string_gs_check(on) to Internet-facing products.
+ISVs should compile with the /GS flag.
+ISVs should link with libraries that use /GS.
+/SafeSEH Exception Handling Protection
+An exception handler is a unit of code executed when an exceptional condition, such as a divide-by-zero, occurs. The address of the handler is held on the stack frame of the function and is therefore subject to corruption and hijacking if a buffer overflow allows an attacker to overwrite the stack. The linker included with Visual Studio 2003 (and later versions) includes an option to store the list of valid exception handlers in the image's PE header at compile time. When an exception is raised at run time, the operating system (Windows Server 2008 R2, Windows 7, Windows Server 2008, Windows Vista, Windows Server 2003, or Windows XP with Service Pack 2 or 3) will not dispatch to an address in that image unless it is one of the exception handler addresses in the PE header.
+Performance: There is no performance impact of /SAFESEH in the non-exception code path.
+ISV Tasks
+ISVs should link their images with /SAFESEH.
+ISVs should link with libraries that are also linked with /SAFESEH.
+Structured Exception Handler Overwrite Protection (SEHOP)
+In Windows Vista SP1 and Windows Server 2008, Microsoft introduced support for Structured Exception Handler Overwrite Protection (SEHOP). SEHOP is capable of protecting against exception chain corruption without requiring code to be rebuilt, unlike /SAFESEH, which requires a re-link. SEHOP support was extended in Windows 7 and Windows Server 2008 R2 by permitting applications to opt-in on a per application basis, as opposed to enabling or disabling SEHOP for the entire system. By default, SEHOP is disabled on Windows Vista and Windows 7 for compatibility reasons, and it is enabled by default on Windows Server 2008 and Windows Server 2008 R2.
+SEHOP can be enabled for an application on Windows 7 by applying the registry setting. Substitute the name of your main EXE for MyExecutable.exe in the example below:
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\MyExecutable.exe]
+"DisableExceptionChainValidation"=dword:00000000
+When using a 64-bit version of Windows, set the Image File Execution Options registry key under the Wow6432Node portion of the registry that corresponds to the registry hive used by 32-bit applications (e.g. HKLM\Software\Wow6432Node\...):
+ISV Tasks
+ISVs should opt-in their applications to SEHOP on Windows 7 and later.
+What’s the difference between SAFESEH and SEHOP?
+On the surface, SAFESEH and SEHOP, appear the same: both help mitigate the severity of attacks that attempt to overwrite exception handlers. SEHOP is a more complete defense because it can protect against handlers that point to non-SafeSEH modules and handlers that point to a non-image region, such as the heap. Either SafeSEH or SEHOP can be used, but the latter is preferred. The best solution is to build your code to use both: SafeSEH will work on versions of Windows prior to Windows Vista SP1, and SEHOP provides a more comprehensive defense on Windows Vista SP1 and later.
+Data Execution Prevention (DEP) / No eXecute (NX)
+Named DEP by Microsoft, and NX by AMD, this defensive technology requires CPU support that prevents code from executing in data segments. Most modern Intel CPUs now support this capability, and all current AMD CPUs support NX. DEP support was first introduced in Windows XP SP2, and is a critically important defense in Windows when used with ASLR. The relationship between DEP/NX and ASLR is explained below.
+If an application targets Windows XP SP3, then ISVs should call SetProcessDEPPolicy to enforce DEP/NX. If it is unknown whether the application will run on a down-level platform that includes support for SetProcessDEPPolicy or not, then call the following code early in the startup code:
+BOOL __cdecl EnableNX(void) {
+HMODULE hK = GetModuleHandleW(L"KERNEL32.DLL");
+BOOL (WINAPI *pfnSetDEP)(DWORD);
+*(FARPROC *) &pfnSetDEP; = GetProcAddress(hK, "SetProcessDEPPolicy");
+if (pfnSetDEP)
+return (*pfnSetDEP)(PROCESS_DEP_ENABLE);
+return(FALSE);
+}
+One caveat with DEP is that if the application has self-modifying code, or performs just-in-time compilation, DEP may cause the application to fail. To alleviate this issue, application ISVs should still opt in to DEP (see the linker switch below), and mark any data that will be used for JITing as follows:
+PVOID pBuff = VirtualAlloc(NULL,4096,MEM_COMMIT,PAGE_READWRITE );
+if (pBuff) {
+// Copy executable ASM code to buffer
+memcpy_s(pBuff,...)
+// Buffer is ready to go so mark as executable and protect from writes
+DWORD dwOldProtect = 0;
+if (!VirtualProtect(pBuff,sizeof scode,PAGE_EXECUTE_READ,&dwOldProtect;))
+// error
+else
+// Call into pBuff
+VirtualFree(pBuff,0,MEM_RELEASE);
+}
+Performance: There is no performance impact of DEP/NX.
+ISV Tasks
+ISVs should link their code with /NXCOMPAT or call SetProcessDEPPolicy.
+ISVs should test their applications on a DEP-capable CPU, note and fix any failures due to DEP.
+Address Space Layout Randomization (ASLR)
+ASLR moves executable images into random locations when a system boots, making it harder for exploit code to operate predictably. For a component to support ASLR, all components that it loads must also support ASLR. For example, if A.exe consumes B.dll and C.dll, all three must support ASLR. By default, Windows Vista and later will randomize system DLLs and EXEs, but DLLs and EXEs created by ISVs must opt in to support ASLR using the /DYNAMICBASE linker option.
+ASLR also randomizes heap and stack memory:
+When an application creates a heap in Windows Vista and later, the heap manager will create that heap at a random location to help reduce the chance that an attempt to exploit a heap-based buffer overrun succeeds. Heap randomization is enabled by default for all applications running on Windows Vista and later.
+When a thread starts in a process linked with /DYNAMICBASE, Windows Vista and later moves the thread's stack to a random location to help reduce the chance that a stack-based buffer overrun exploit will succeed.
+Performance In general, ASLR has no performance impact. In some scenarios, there’s a slight performance improvement on 32-bit systems. However, it is possible that degradation could occur in highly congested systems with many images that are loaded at random locations. The performance impact of ASLR is difficult to quantify because the quantity and size of the images need to be taken into account. The performance impact of heap and stack randomization is negligible.
+ISV Tasks
+ISVs should link with Microsoft Linker version 8.00.50727.161 (the first version to support ASLR) or later.
+ISVs should link with the /DYNAMICBASE linker switch, unless using Microsoft Linker version 10.0 or later which enables /DYNAMICBASE by default.
+ISVs should test their application on Windows Vista and later and note and fix failures due to ASLR.
+Important Note ASLR and DEP are only effective when used together; therefore ISVs should opt-in for both defenses (/DYNAMICBASE and /NXCOMPAT) for all binaries.
+Pointer Encoding
+Pointers, especially globally-scoped function pointers, are a common attack target when an attack exploits a buffer overrun vulnerability. Windows includes functions that XOR pointers with a random value, which makes exploitation more difficult for an attacker, because the attacker would have to overwrite the pointer with a value that would be correct after the XOR operation. The general usage pattern is to change this:
+FUNC_PTR fp = (FUNC_PTR)(&SomeFunc;);
+// more code
+(*fp)();
+To this:
+FUNC_PTR fp = (FUNC_PTR)EncodePointer(&SomeFunc;);
+// more code
+(*(FUNC_PTR)DecodePointer(fp))();
+Performance There is negligible performance impact as the encode and decode operations are often optimized to an inline XOR operation.
+ISV Tasks
+ISVs should encode globally-scoped function pointers.
+ISVs should consider encoding all function pointers.
+Heap Metadata Protection
+Heap metadata protection is the ability to cause an application to fail immediately if the heap manager detects that the application has corrupted the heap, or if the heap becomes inconsistent. Heap metadata protection not only detects heap-based buffer overruns, but also certain illegal operations. (For example, freeing a pointer to the wrong heap will also fail the application.)
+Enabling heap metadata protection requires a small code addition. If the application targets Windows Vista and later or Windows Server 2008 and later, add this line to main or WinMain:
+BOOL f=HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
+If the code will run on earlier versions of Windows, use the following code. This code will fail gracefully on Windows platforms that do not support heap metadata protection, and will enable the heap corruption detection option for the calling application when the code is run on Windows Vista and later.
+BOOL SetHeapOptions() {
+SetDllDirectory(L"");
+HMODULE hLib = LoadLibrary(L"kernel32.dll");
+if (hLib == NULL) return FALSE;
+typedef BOOL (WINAPI *HSI)
+(HANDLE, HEAP_INFORMATION_CLASS ,PVOID, SIZE_T);
+HSI pHsi = (HSI)GetProcAddress(hLib,"HeapSetInformation");
+if (!pHsi) {
+FreeLibrary(hLib);
+return FALSE;
+}
+#ifndef HeapEnableTerminationOnCorruption
+# define HeapEnableTerminationOnCorruption (HEAP_INFORMATION_CLASS)1
+#endif
+BOOL fRet = (pHsi)(NULL,HeapEnableTerminationOnCorruption,NULL,0)
+? TRUE
+: FALSE;
+if (hLib) FreeLibrary(hLib);
+return fRet;
+}
+Note The call to HeapSetInformation is performed automatically by the C/C++ startup code when the code is compiled with Visual Studio 2010 or later, so there is no need to explicitly call HeapSetInformation in the startup code.
+What Heap Metadata Protection Detection Looks Like
+When an application fails and is terminated because of heap corruption, the following output may be seen in a debugger:
+HEAP[Crash.exe]: Heap block at 001B6758 modified at 001B678E past requested size of 2e
+(1770.25ac): Break instruction exception - code 80000003 (first chance)
+eax=001b6758 ebx=001b678e ecx=774614cd edx=0012fae9 esi=001b6758 edi=0000002e
+eip=77482ea8 esp=0012fd2c ebp=0012fd30 iopl=0 nv up ei pl nz na po nc
+cs=001b ss=0023 ds=0023 es=0023 fs=003b gs=0000 efl=00000202
+ntdll!DbgBreakPoint:
+77482ea8 cc int 3
+0:000> kb
+ChildEBP RetAddr Args to Child
+0012fd30 774dc900 001b6758 00000000 001b6758 ntdll!DbgBreakPoint
+0012fd48 774c4b6e 00000000 001b6758 7748c67e ntdll!RtlImageRvaToVa+0x1c3
+0012fd64 7745894a 001b0000 001b6758 7748c67e ntdll!RtlDeleteAce+0x1355f
+0012fdd0 7614b019 001b0000 00000000 001b6760 ntdll!RtlValidateHeap+0x79
+0012fde4 6557cb0a 001b0000 00000000 001b6760 kernel32!HeapValidate+0x14
+Performance There is no performance impact.
+ISV Tasks
+ISVs should include heap metadata protection in all EXEs, either by compiling with VC++ 2010, or by adding the code sample above and calling it from main or WinMain.
+Migrate buffer-overrun prone functions to safer versions
+Visual C++ 2008 and later can migrate a number of C runtime functions that commonly lead to vulnerabilities to safer versions of the function. To instruct the compiler to perform this step, add the following two lines of code to a commonly used header file, such as stdafx.h:
+#define CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 1
+#define CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_MEMORY 1
+This code will force functions such as memcpy, strcpy and strncat to safer versions like memcpy_s, strcpy_s and strncat_s, respectively, if the compiler knows the destination buffer size at compile time.
+For example, the following code:
+void func(char *p) {
+char d[20];
+strcpy(d,p);
+// etc
+}
+Will automatically migrate to the safer:
+void func(char *p) {
+char d[20];
+strcpy_s(d,__countof(d), p);
+// etc
+}
+Performance There is negligible performance impact.
+ISV Tasks
+ISVs should add the two #define constants described above to a header file commonly used in the application.
+Importance and Priority of Defenses
+Software developers are urged to use all of the defenses described in this paper; however some developers may choose to enable these defenses incrementally over time. The following table outlines the relative importance of these defenses, and the priority with which ISVs should support each defense. The Security Development Lifecycle (SDL) status of each defense is also included.
+Defense |
+Priority |
+Where Defense is Made |
+SDL Type |
+C++ Compiler Version |
+Critical |
+N/A |
+Requirement |
+Address space layout randomization opt-in |
+Critical |
+Link time |
+Requirement |
+DEP opt-in |
+Critical |
+Link time |
+Requirement |
+/GS stack-based buffer overrun detection |
+Critical |
+Compile time |
+Requirement |
+/SAFESEH exception handler protection |
+Critical |
+Link time |
+Requirement |
+Function migration |
+High |
+Code change |
+Removal of banned APIs is an SDL requirement, automated migration to safer versions is recommended. |
+SEHOP opt-in |
+High |
+Setup |
+Future SDL release requirement |
+Pointer Encoding |
+Moderate |
+Code change |
+Recommendation |
+Heap corruption detection |
+Moderate |
+Code change |
+Requirement |
+Important Note: It is critically important for software developers who are building Internet Explorer extensions and plugins to opt in for ASLR and DEP and take advantage of the defenses in Internet Explorer 8 and later.
+Developers who are using agile development methods can add critical defenses in the next full sprint cycle (and others in a subsequent sprint).
+How to Verify Compliance with this Paper
+The following practices should be verified using the BinScope Binary Analyzer.
+C++ Compiler version.
+Use of /GS.
+Use of /SAFESEH.
+Use of /NXCOMPAT (DEP).
+Use of /DYNAMICBASE (ASLR).
+Ensure BinScope is configured to check for the settings above. A ‘PASS’ for each check indicates that the code has the settings enabled.
+Note: Presently, BinScope checks for VC++ 2005 or later. Use of VC++ 2008 SP1 or later is highly recommended because of improvements in -GS.
+Important: In some cases, DEP may not be enforced for the application or component. This issue is often caused when the application is linked to a non-DEP enabled library (for example, older versions of the Abstract Template Library (ATL) included with Visual Studio). If ATL is required by the application, use the version shipped with Visual Studio 2005 (ATL v8.0) or later. The ATL version can be verified with a debug code like the one below, which can be added to the main or WinMain function:
+// Version in Visual Studio 2005 or later
+assert(AtlGetVersion(NULL) >= 0x0800);
+How to Verify Compliance with Function Migration
+Developers can look for the two #defines described earlier to verify that the C++ compiler code is configured to migrate some C runtime functions to safer calls.
+How to Verify Compliance with SEHOP
+Applications that run on Windows 7 can check compliance with SEHOP by verifying that the appropriate registry values have been set. Specifically, the “DisableExceptionChainValidation” in “HKEY_LOCAL_MACHINE\Software\[Wow6432Node]\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\” should be set to 0.
+Use the following PowerShell script to determine if SEHOP is enabled for an application.
+param(
+[String]$ExeName = $(throw "Please specify an application name.")
+)
+Clear-Host
+$SEHOPEnabled = $false
+if ($env:PROCESSOR_ARCHITECTURE -eq "x86") {
+$hive = "HKLM:\SOFTWARE\"
+} else {
+$hive = "HKLM:\SOFTWARE\Wow6432Node\"
+}
+$hive += "Microsoft\Windows NT\CurrentVersion\Image File Execution Options\"
+$hive += $args[0]
+$eo = Get-ItemProperty -Path $hive -ErrorAction SilentlyContinue
+if ($eo.DisableExceptionChainValidation -eq 0) {
+$SEHOPEnabled = $true
+}
+"SEHOP Enabled for " + $args[0] + ": " + $SEHOPEnabled
+Save the script to a file named get-sehop.ps1 and then use the following command-line from within a PowerShell environment to verify if SEHOP is enabled for an application:
+get-sehop <appname>
+How to Verify Compliance with Pointer Encoding
+The best way to verify compliance with Pointer Encoding is to look for the calls to EncodePointer or EncodeSystemPointer in the code accessing function pointers.
+How to Verify Compliance with Heap Metadata Protection
+The best way to verify compliance with Heap Metadata Protection is to look for the correct call to HeapSetInformation in the code, or to compile with Visual C++ 2010 or later.
+Summary
+Microsoft has added many buffer overrun defenses to Windows and Visual C++. Software developers who are building on Windows have the responsibility of adding these defenses to protect our shared customers. This is especially true for software developers who build extensions or controls for browsers such as Internet Explorer.
+By following the guidance offered in this paper, software developers can build components that operate more securely on Windows and within Internet Explorer.
+References
+Microsoft Security Development Lifecycle
+Windows Vista Security – A Bigger Picture
+Protecting Your Code with Visual C++ Defenses
+Hardening Stack-based Buffer Overrun Detection in VC++ 2005 SP1
+VC++ 2010 and memcpy
+Data Execution Prevention (DEP)
+DEP as a mitigation technology (part 1 and part 2)
+New NX APIs added to Windows Vista SP1, Windows XP SP3 and Windows Server 2008
+SEHOP overview
+How to enable or disable SEHOP system-wide
+Per-process opt-in support in Windows 7
+Protecting against Pointer Subterfuge
+Additional resources
+Last updated on
+2010-12-06
+In this article
+en-us
+Your Privacy Choices
+Theme
+Light
+Dark
+High contrast
+AI Disclaimer
+Previous Versions
+Blog
+Contribute
+Privacy
+Consumer Health Privacy
+Terms of Use
+Trademarks
+© Microsoft 2026
