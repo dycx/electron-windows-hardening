@@ -70,16 +70,43 @@ const DLLCHAR = [
   [0x4000, 'GUARD_CF'],
 ]
 
+// GuardFlags 位定义 —— 依据 LLVM llvm/BinaryFormat/COFF.h 的 GuardFlags 枚举
+// (https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/COFF.h)
+//
+// ⚠️ 两个曾把本项目作者坑到的点，改这段代码前务必先读：
+//
+//  1. bits 28-31 (0xF0000000) 是【步长子字段 CF_FUNCTION_TABLE_SIZE_MASK】，
+//     不是标志位。它的含义是"CFG 函数表每项的额外字节数"：
+//         nibble 4 → 每项 4 字节（就是标准地址宽度）
+//         nibble 5 → 每项 5 字节（额外 1 字节元数据）
+//     绝不能把它当成一个已设置的标志位来遍历，否则会凭空报出
+//     "0x40000000 XFG_ENABLED" 之类的假标志。
+//
+//  2. EH_CONTINUATION_TABLE_PRESENT 是 0x400000（24 位区间），
+//     不是 0x200000、也不是 0x40000000。0x20000 / 0x40000 / 0x80000 /
+//     0x100000 / 0x200000 / 0x400000 这些位在 LLVM 的枚举里【不存在】，
+//     属于 MSVC 保留位，不要给它们编造名字。
 const GUARD_FLAGS = [
   [0x00000100, 'CF_INSTRUMENTED'],
+  [0x00000200, 'CFW_INSTRUMENTED'],
   [0x00000400, 'CF_FUNCTION_TABLE_PRESENT'],
+  [0x00000800, 'SECURITY_COOKIE_UNUSED'],
+  [0x00001000, 'PROTECT_DELAYLOAD_IAT'],
+  [0x00002000, 'DELAYLOAD_IAT_IN_ITS_OWN_SECTION'],
+  [0x00004000, 'CF_EXPORT_SUPPRESSION_INFO_PRESENT'],
   [0x00008000, 'CF_ENABLE_EXPORT_SUPPRESSION'],
   [0x00010000, 'CF_LONGJUMP_TABLE_PRESENT'],
-  [0x00020000, 'RF_INSTRUMENTED'],
-  [0x00100000, 'RETPOLINE_PRESENT'],
-  [0x00200000, 'EH_CONTINUATION_TABLE_PRESENT'],
-  [0x00400000, 'XFG_ENABLED'],
+  [0x00400000, 'EH_CONTINUATION_TABLE_PRESENT'],
 ]
+
+// CFG 函数表项步长（bits 28-31），nibble 值直接就是字节数
+const CFG_TABLE_STRIDE = (gf) => (gf >>> 28) & 0xf
+
+const GUARD_FLAGS_STRIDE_MASK = 0xf0000000
+// 未映射位【动态计算】，不要硬编码掩码。
+// 实测 v41.10.7 与 v44.4.5 的未定义位分别是 0x0C940035 / 0x0E2200CD，
+// 散布在 bit0-7、bit17-27 —— 手写掩码必然漏。用"已定义位的补集"才可靠。
+const GUARD_FLAGS_DEFINED_MASK = GUARD_FLAGS.reduce((m, [b]) => m | b, 0)
 
 function parsePE(buf) {
   if (buf.length < 0x40 || buf.toString('latin1', 0, 2) !== 'MZ') return null
@@ -135,8 +162,34 @@ function parsePE(buf) {
       const rd64 = (o) => (raw.length >= o + 8 ? raw.readBigUInt64LE(o) : 0n)
       const rd32 = (o) => (raw.length >= o + 4 ? raw.readUInt32LE(o) : 0)
       out.loadConfig = plus
-        ? { securityCookie: rd64(0x58), guardCfCheck: rd64(0x70), guardCfDispatch: rd64(0x78), guardCfTable: rd64(0x80), guardCfCount: rd64(0x88), guardFlags: rd32(0xa0) }
-        : { securityCookie: BigInt(rd32(0x40)), guardCfCheck: BigInt(rd32(0x4c)), guardCfDispatch: BigInt(rd32(0x50)), guardCfTable: BigInt(rd32(0x54)), guardCfCount: BigInt(rd32(0x58)), guardFlags: rd32(0x70) }
+        ? {
+            securityCookie: rd64(0x58),
+            guardCfCheck: rd64(0x70),
+            guardCfDispatch: rd64(0x78),
+            guardCfTable: rd64(0x80),
+            guardCfCount: rd64(0x88),
+            guardFlags: rd32(0xa0),
+            // MSVC 2019 追加字段：EH continuation 表（/guard:ehcont）
+            guardEhContTable: rd64(0x28),
+            guardEhContCount: rd64(0x30),
+            // XFG（eXtended Flow Guard）三个指针，未启用时为 0
+            guardXfgCheck: rd64(0x38),
+            guardXfgDispatch: rd64(0x40),
+            guardXfgTable: rd64(0x48),
+          }
+        : {
+            securityCookie: BigInt(rd32(0x40)),
+            guardCfCheck: BigInt(rd32(0x4c)),
+            guardCfDispatch: BigInt(rd32(0x50)),
+            guardCfTable: BigInt(rd32(0x54)),
+            guardCfCount: BigInt(rd32(0x58)),
+            guardFlags: rd32(0x70),
+            guardEhContTable: BigInt(rd32(0x1c)),
+            guardEhContCount: BigInt(rd32(0x20)),
+            guardXfgCheck: BigInt(rd32(0x24)),
+            guardXfgDispatch: BigInt(rd32(0x28)),
+            guardXfgTable: BigInt(rd32(0x2c)),
+          }
       out.loadConfigRaw = raw
     }
   }
@@ -230,16 +283,29 @@ if (!appExeBuf) {
         fail('PE', 'CFG 插桩明细', 'GuardFlags=0，二进制未真正被 CFG 插桩（仅有 DllCharacteristics 标志不够）')
       } else {
         const on = GUARD_FLAGS.filter(([b]) => gf & b).map(([, n]) => n)
-        pass('PE', 'CFG 插桩明细', `GuardFlags=0x${gf.toString(16).padStart(8, '0')} → ${on.join(', ')}`)
+        pass('PE', 'CFG 插桩明细', `GuardFlags=0x${gf.toString(16).padStart(8, '0')} → ${on.join(', ') || '(无已知标志)'}`)
+        // 步长子字段单独解读，绝不当成标志位
+        const stride = CFG_TABLE_STRIDE(gf)
+        info('PE', 'CFG 表项步长', `bits28-31=${stride} → 每项 ${stride} 字节（4=标准地址宽度）`)
+        const unmapped = gf & ~GUARD_FLAGS_DEFINED_MASK & ~GUARD_FLAGS_STRIDE_MASK
+        const unmappedBits = [...Array(32).keys()].filter((i) => (unmapped >>> i) & 1)
+        if (unmapped) {
+          info('PE', 'GuardFlags 未映射位', `0x${unmapped.toString(16)}（bit ${unmappedBits.join(', ')}；LLVM/winnt 未定义，不同 Electron 版本本就不同，不作安全判据）`)
+        }
         if (gf & 0x00000100) pass('PE', 'CFG 已插桩 (CF_INSTRUMENTED)', 'ok')
         else fail('PE', 'CFG 已插桩 (CF_INSTRUMENTED)', '缺少 IMAGE_GUARD_CF_INSTRUMENTED')
       }
       info('PE', 'GuardCFCheck / Dispatch', `0x${lc.guardCfCheck.toString(16)} / 0x${lc.guardCfDispatch.toString(16)}`)
       if (lc.guardCfTable !== 0n) info('PE', 'CFG 函数表', `${lc.guardCfCount} 个合法间接调用目标`)
-      const eh = gf & 0x00200000
+      // EH continuation 元数据：位 0x400000 声明，同时用 GuardEHContinuationTable/Count 交叉验证。
+      // 实测 v41/v44 都出现"位已声明但表指针为 0"的情况，故位与指针不一致时如实报出，不硬判 pass/fail。
       if (pe.machine === 0x8664 || pe.machine === 0xaa64) {
-        if (eh) pass('PE', 'EH continuation 元数据 (/guard:ehcont)', 'ok')
-        else warn('PE', 'EH continuation 元数据 (/guard:ehcont)', '未设置，CET 硬件影子栈场景下异常处理链缺少保护')
+        const bitSet = (gf & 0x00400000) !== 0
+        const tableSet = (lc.guardEhContTable ?? 0n) !== 0n
+        if (bitSet && tableSet) pass('PE', 'EH continuation 元数据 (/guard:ehcont)', `表 0x${lc.guardEhContTable.toString(16)}，${lc.guardEhContCount} 项`)
+        else if (bitSet !== tableSet) info('PE', 'EH continuation 元数据 (/guard:ehcont)', `GuardFlags 位=${bitSet ? '已声明' : '未声明'}，表指针=${tableSet ? '非空' : '为空'}（两者不一致，见报告说明）`)
+        else if (bitSet) pass('PE', 'EH continuation 元数据 (/guard:ehcont)', 'GuardFlags 已声明')
+        else warn('PE', 'EH continuation 元数据 (/guard:ehcont)', '未声明，CET 硬件影子栈场景下异常处理链缺少保护')
       }
     } else {
       fail('PE', 'Load Config 目录', '不存在，无法确认 /GS 与 CFG')

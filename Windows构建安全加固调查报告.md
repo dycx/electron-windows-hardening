@@ -2,6 +2,7 @@
 
 **调查日期**：2026-09-28
 **基线版本**：`electron-builder@26.15.3` / `electron@44.4.5` / `@electron/fuses@2.1.3` / `electron-updater@6.8.9`
+**版本适用性**：另对 `electron@41.10.7` 做了完整实测对比，结论见 §2.6 —— 加固配置对 41 完全适用，但 41 已于 2026-08-24 EOL
 **方法**：阅读 electron-builder 与 Electron 的实际源码 + 对官方 Electron Windows 二进制做 PE 级实测。所有结论标注了来源，`[实测]` 表示本机验证过，`[源码]` 表示读代码确认。
 
 ---
@@ -41,18 +42,23 @@ DllCharacteristics  : 0xC160
     [ON ] GUARD_CF (Control Flow Guard) (0x4000)
     [ON ] TERMINAL_SERVER_AWARE  (0x8000)
 Load Config         : present (320 bytes)
-    SecurityCookie      : 0x14e2b6040   → /GS 栈保护 cookie 已存在
-    GuardCFCheckFunction: 0x14e22df70   → CFG 检查函数已就位
-    GuardCFDispatch     : 0x14e22df78
+    SecurityCookie      : 0x14E2B6040   → /GS 栈保护 cookie 已存在
+    GuardCFCheckFunction: 0x14E22DF70   → CFG 检查函数已就位
+    GuardCFDispatch     : 0x14E22DF78
     CFG 函数表          : 207,090 个合法间接调用目标
     GuardFlags          : 0x4E22DDCD
         [ON ] CF_INSTRUMENTED                    ← 二进制真的被 CFG 插桩了
         [ON ] CF_FUNCTION_TABLE_PRESENT
+        [ON ] SECURITY_COOKIE_UNUSED
+        [ON ] PROTECT_DELAYLOAD_IAT
+        [ON ] CF_EXPORT_SUPPRESSION_INFO_PRESENT
         [ON ] CF_ENABLE_EXPORT_SUPPRESSION
-        [ON ] CF_LONGJUMP_TABLE_PRESENT
-        [ON ] RF_INSTRUMENTED
-        [ON ] EH_CONTINUATION_TABLE_PRESENT       ← /guard:ehcont 也开了
+        CFG 表项步长 (bits28-31) = 4  → 每项 4 字节（标准地址宽度）
 ```
+
+> **⚠️ 本报告 v1 在此处有一处错误，已修正。** 我最初把 `EH_CONTINUATION_TABLE_PRESENT` 写成 `0x00200000`（正确值是 `0x00400000`），并据此报告 v44 "已开启 `/guard:ehcont`"。按权威定义（LLVM `llvm/BinaryFormat/COFF.h` 的 `GuardFlags` 枚举）重新核对后：**v44 的该位未设置**；反而是 **v41 设置了该位**。同时 bits 28-31 是 `CF_FUNCTION_TABLE_SIZE_MASK`（步长）而非标志位，我最初把它误读成了一个独立的 `XFG_ENABLED` 标志。教训：`GuardFlags` 的位定义必须以权威来源为准，不能凭记忆。
+
+**另一个值得记录的现象**：v41 与 v44 都出现"`GuardFlags` 声明了 `EH_CONTINUATION_TABLE_PRESENT`，但 `GuardEHContinuationTable` 指针为 0、计数为 0"的不一致（v41 声明了但表为空）。这说明该位的语义与实际表的存在性并不总是一致，因此**本报告的验收脚本不把它当作硬性 pass/fail，而是如实报出两者是否一致**。
 
 **关键机制（这一点必须理解清楚）**：electron-builder 产出的 `YourApp.exe` **不是** electron-builder 自己编译的 C++ 程序，而是**把官方 `electron.exe` 改名后的副本**。
 
@@ -415,6 +421,62 @@ version=1  length=9  wire=101100011
 
 **建议**：优先用 `electronFuses` 配置项，不要用 `afterPack`，除非你需要 `strictlyRequireAllFuses` 之类的进阶能力。
 
+### 2.6 与 Electron 41 的逐项对比（实测）
+
+因为本报告的所有数据来自 v44.4.5，这里补一组 v41.10.7 的实测，用来判断结论能否直接套用。
+
+**先说最重要的结论：Electron 41 已于 2026-08-24 EOL。**
+
+`[文档]` Electron 官方支持策略是**最新 3 个稳定大版本**。当前最新为 44，因此受支持的是 **44 / 43 / 42**；42 也将在 2026-10-20 EOL。
+
+| 大版本 | stable 发布 | EOL | 状态（截至 2026-09-28） |
+|---|---|---|---|
+| 44 | 2026-08-25 | 2027-03-02 | stable（当前最新） |
+| 43 | 2026-06-30 | 2027-01-05 | stable |
+| 42 | 2026-05-05 | 2026-10-20 | stable，**22 天后 EOL** |
+| **41** | 2026-03-10 | **2026-08-24** | **已 EOL（35 天）** |
+| 40 | 2026-01-15 | 2026-07-01 | 已 EOL |
+
+`[实测]` v41.10.7（41.x 的最后一个版本，发布于 EOL 当天）的实际状态：
+
+**fuse wire 与 v44 完全相同**（`version=1 length=9 wire=101100011`），9 个 fuse 逐位一致：
+
+| fuse | v41.10.7 | v44.4.5 |
+|---|---|---|
+| RunAsNode | ENABLED | ENABLED |
+| EnableCookieEncryption | DISABLED | DISABLED |
+| EnableNodeOptionsEnvironmentVariable | ENABLED | ENABLED |
+| EnableNodeCliInspectArguments | ENABLED | ENABLED |
+| EnableEmbeddedAsarIntegrityValidation | DISABLED | DISABLED |
+| OnlyLoadAppFromAsar | DISABLED | DISABLED |
+| LoadBrowserProcessSpecificV8Snapshot | DISABLED | DISABLED |
+| GrantFileProtocolExtraPrivileges | ENABLED | ENABLED |
+| WasmTrapHandlers | ENABLED | ENABLED |
+
+→ **本报告的 `electronFuses` 加固配置对 v41 完全适用，一个字都不用改。** §2.4 的"5 个高危开关默认开启"结论对 v41 同样成立。
+
+**PE 缓解措施层面，两者实质等价**（都靠 Clang/lld 的 Chromium 工具链产出）：
+
+| 项目 | v41.10.7 | v44.4.5 |
+|---|---|---|
+| `DllCharacteristics` | 0xC160 | 0xC160 |
+| ASLR / HighEntropyVA / DEP / CFG | 全开 | 全开 |
+| SecurityCookie（`/GS`） | 0x14CDE4040 | 0x14E2B6040 |
+| CFG 已插桩 | 是 | 是 |
+| CFG 函数表规模 | 191,452 | 207,090 |
+| CFG 表项步长 | 4 字节 | 4 字节 |
+| `CF_FUNCTION_TABLE_PRESENT` | 未置位 | 已置位 |
+| `EH_CONTINUATION_TABLE_PRESENT` | 已置位（但表指针为 0） | 未置位 |
+| `SEHandlerTable` | 0（x64 无意义） | 0（x64 无意义） |
+
+`CF_FUNCTION_TABLE_PRESENT` 一位的差异值得注意：v41 的函数表明明有 191,452 项，却没有置这一位。这属于 PE 元数据声明层面的差异，**我无法据此断言 v41 的 CFG 保护更弱**——两者都真正被 CFG 插桩了（`CF_INSTRUMENTED` 均已置位）。就本报告关心的威胁模型（防替换、防篡改）而言，v41 与 v44 **没有实质区别**。
+
+**结论：用 Electron 41 时，本报告的全部加固建议依然成立且必要；唯一的额外问题是 v41 已 EOL——Chromium 146 与 Node 24.18 之后发现的漏洞都不会再为 41.x 修复。** 是否升级不只是安全问题，也是合规问题（等保、ISO 27001、客户安全问卷通常要求不使用 EOL 组件）。
+
+> 更精确地说，Electron 的 EOL 是"整个大版本线停止接收安全修复"，不是"停止下载"。你仍然可以构建、仍然可以发布，只是暴露在未修补的漏洞之下。
+
+**顺带说明 `npm` 侧的构建能否继续**：electron-builder 从 GitHub Releases 下载 `electron-v41.10.7-win32-x64.zip`，EOL 不影响该产物存在（本次实测就是直接下载成功的）。但 `electron-dist` 镜像若做过清理，旧版本可能需要改用 `electronDownload.mirror` 或自建镜像。生产环境建议把所用 Electron 版本**归档到你自己的存储**，不要依赖上游长期保留。
+
 ---
 
 ## 3. 加固配置清单
@@ -623,15 +685,19 @@ PASS=21  WARN=3  FAIL=0  SKIP=1
 
 ---
 
-## 附录 A：调查过程中纠正的三个技术误解
+## 附录 A：调查过程中纠正的四个技术误解
 
-这三点我在验证时都亲自踩到或差点踩到，值得单独列出：
+这四点我在验证时都亲自踩到或差点踩到，值得单独列出（第 4 条是本报告自身的错误，已修正）：
 
 1. **ASAR header 哈希的输入范围。** 我最初对文件里的 8 字节对齐块（512B）求哈希，得到 `054719ad...`；正确值是对 pickle 字符串（508B）求哈希得到 `2e90a55f...`。**尾部的 `0x00` 填充会完全改变哈希值。** 自己实现构建或校验时，必须先读 pickle 的字符串长度再取字节。
 
 2. **PE 里 `VirtualSize = 0` 的 section 会破坏朴素的 RVA→文件偏移映射。** 我在写解析器时先用 `max(VirtualSize, RawSize)` 做范围匹配，结果一个 `RawSize` 高达 2.5GB 的 section 吞掉了整个地址空间并抢到了错误的映射，导致 `GuardFlags` 读成 `0x48000007` 而不是正确的 `0x4E22DDCD`，并误报"CFG 未插桩"。**正确做法：只用 `VirtualSize` 判定归属，多候选取虚拟范围最小者。** 修正后与独立实现逐字段一致。
 
 3. **`SafeSEH` 在 x64 上是无意义的。** 它只对 32 位 x86 有效（基于栈的 SEH）。在 x64 上异常处理用表驱动的展开信息，`SEHandlerTable` 为空是**正常**的，不是缺陷。不要因为 BinSkim 报 `BA2018` 就以为 x64 有问题。
+
+4. **`GuardFlags` 的位定义不能凭记忆，必须查权威来源。**
+   本报告 v1 在这里出过错：我把 `EH_CONTINUATION_TABLE_PRESENT` 写成 `0x00200000`（**正确值是 `0x00400000`**），并据此把 v44 的 `/guard:ehcont` 报成"已开启"——实际 v44 该位未设置。同时 bits 28-31（`0xF0000000`）是 `CF_FUNCTION_TABLE_SIZE_MASK`（CFG 表项步长），**不是标志位**，我最初把它误读成一个独立的 `XFG_ENABLED` 标志。
+   正确依据是 LLVM 的 [`llvm/BinaryFormat/COFF.h`](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/COFF.h) 中的 `GuardFlags` 枚举。除已定义的位之外，还有大量位（实测 v41 命中 `0x0C940035`、v44 命中 `0x0E2200CD`，散布在 bit0-7 与 bit17-27）在任何公开文档中都没有定义——**不要给它们编造名字**。验收脚本里已改为动态计算"未映射位"（取已定义位的补集），不再硬编码掩码，避免同类错误。
 
 ## 附录 B：手工审计工具
 

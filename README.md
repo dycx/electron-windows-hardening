@@ -17,9 +17,12 @@ electron-builder 产出的 `YourApp.exe` 不是它编译的 C++ 程序，而是*
 
 ```
 DllCharacteristics = 0xC160  → HIGH_ENTROPY_VA + DYNAMIC_BASE + NX_COMPAT + GUARD_CF
-SecurityCookie      = 0x14e2b6040              → /GS 已开
+SecurityCookie      = 0x14E2B6040              → /GS 已开
 GuardFlags          = 0x4E22DDCD
-    CF_INSTRUMENTED, CF_FUNCTION_TABLE_PRESENT, EH_CONTINUATION_TABLE_PRESENT
+    CF_INSTRUMENTED, CF_FUNCTION_TABLE_PRESENT, SECURITY_COOKIE_UNUSED,
+    PROTECT_DELAYLOAD_IAT, CF_EXPORT_SUPPRESSION_INFO_PRESENT,
+    CF_ENABLE_EXPORT_SUPPRESSION
+    CFG 表项步长 (bits28-31) = 4 → 每项 4 字节（标准地址宽度）
 CFG 函数表          = 207,090 个合法间接调用目标
 ```
 
@@ -99,7 +102,7 @@ node verify-win-hardening.mjs dist/win-unpacked --expect-publisher "Your Company
 
 它能抓住那些"配了但没生效"的情况：构建缓存复用旧 exe、`signAndEditExecutable: false` 导致资源没写进去、证书过期、忘了配 `publisherName` 导致更新验签被静默跳过。
 
-## 调查中纠正的三个技术误区
+## 调查中纠正的四个技术误区
 
 写在这里是因为它们都会导致真实的错误实现：
 
@@ -111,6 +114,29 @@ Electron 校验的是 **pickle 解码后的 header 字符串**，**不含**文�
 
 **3. `SafeSEH` 在 x64 上无意义。**
 它只对 32 位 x86 有效。x64 用表驱动的展开信息，`SEHandlerTable` 为空是**正常**的。不要因为 BinSkim 报 `BA2018` 就以为 x64 有问题。
+
+**4. `GuardFlags` 的位定义不能凭记忆，必须查权威来源。**
+本仓库 v1 在这里出过错：把 `EH_CONTINUATION_TABLE_PRESENT` 写成 `0x00200000`（**正确值是 `0x00400000`**），据此把 v44 的 `/guard:ehcont` 报成"已开启"——实际 v44 该位未设置。同时 bits 28-31（`0xF0000000`）是 `CF_FUNCTION_TABLE_SIZE_MASK`（CFG 表项步长），**不是标志位**。
+正确依据是 LLVM 的 [`llvm/BinaryFormat/COFF.h`](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/COFF.h) 中的 `GuardFlags` 枚举。除已定义的位之外还有大量位（实测 v41 命中 `0x0C940035`、v44 命中 `0x0E2200CD`，散布在 bit0-7 与 bit17-27）在任何公开文档中都没有定义——**不要给它们编造名字**。验收脚本已改为动态计算"未映射位"（取已定义位的补集），不再硬编码掩码。
+
+## 兼容 Electron 41
+
+`electron@41.10.7` 与 `44.4.5` 的实测对比：
+
+| 项目 | 41.10.7 | 44.4.5 |
+|---|---|---|
+| **fuse wire** | `101100011` | `101100011`（**逐位相同**） |
+| DllCharacteristics | 0xC160 | 0xC160 |
+| ASLR / HighEntropyVA / DEP / CFG | 全开 | 全开 |
+| SecurityCookie（`/GS`） | 0x14CDE4040 | 0x14E2B6040 |
+| CFG 函数表规模 | 191,452 | 207,090 |
+| `CF_FUNCTION_TABLE_PRESENT` | 未置位 | 已置位 |
+
+**本仓库的 `electronFuses` 加固配置对 41 完全适用，一个字都不用改**；"5 个高危开关默认开启"的结论对 41 同样成立。就本仓库关心的威胁模型（防替换、防篡改）而言，41 与 44 **没有实质区别**。
+
+> ⚠️ **但 Electron 41 已于 2026-08-24 EOL。** 官方支持策略是最新 3 个稳定大版本（当前为 44 / 43 / 42，其中 42 将在 2026-10-20 EOL）。EOL 意味着 Chromium 146 与 Node 24.18 之后发现的漏洞都不会再为 41.x 修复——仍可构建、仍可发布，但暴露在未修补的漏洞之下。这在等保 / ISO 27001 / 客户安全问卷里通常也会被直接判定为不符合项。
+
+另外建议把所用 Electron 版本**归档到你自己的存储**：EOL 不影响 GitHub Releases 上的产物存在（本次实测直接下载成功），但不要依赖上游长期保留。
 
 ## 已知的未解权衡
 
@@ -162,6 +188,8 @@ node verify-win-hardening.mjs dist/win-unpacked --expect-publisher "Your Company
 ## 基线版本
 
 `electron@44.4.5` · `electron-builder@26.15.3` · `@electron/fuses@2.1.3` · `electron-updater@6.8.9`
+
+已对 `electron@41.10.7` 做完整实测对比，结论见上文「兼容 Electron 41」。
 
 electron-builder v27 有几项安全默认值会变化（web installer 默认禁用、移除隐式 `--publish`、`latest*.yml` 的 Ed25519 签名等），升级前请对照报告第 0 节与官方 v27 Breaking Changes。
 
